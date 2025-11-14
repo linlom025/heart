@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>粒子 3D 爱心</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background: #ffffff;
+        font-family: "HarmonyOS Sans", "PingFang SC", "Microsoft YaHei", sans-serif;
+        color: #2f1c3e;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        padding: 32px;
+      }
+
+      .stage {
+        width: min(1400px, 100%);
+        aspect-ratio: 20 / 11;
+        border-radius: 18px;
+        background: #ffffff;
+        box-shadow: 0 50px 160px rgba(56, 20, 90, 0.12);
+        position: relative;
+        overflow: hidden;
+      }
+
+      canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+      }
+
+      @media (max-width: 960px) {
+        body {
+          padding: 16px;
+        }
+
+        .stage {
+          aspect-ratio: 4 / 3;
+        }
+
+      }
+    </style>
+  </head>
+  <body>
+    <div class="stage" id="stage"></div>
+
+    <script type="module">
+      import * as THREE from "./vendor/three.module.js";
+      import { OrbitControls } from "./vendor/OrbitControls.js";
+      import GUI from "./vendor/lil-gui.module.js";
+
+      // 基础配置，可通过 GUI 调整
+      const config = {
+        particleCount: 5000,
+        pulseSpeed: 1.6,
+        floatAmplitude: 0.18,
+        pointSize: 25,
+        depthFactor: 3,
+        colorA: "#ff3da7",
+        colorB: "#8c2dff",
+      };
+
+      const stage = document.getElementById("stage");
+      const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      renderer.setSize(stage.clientWidth, stage.clientHeight);
+      stage.appendChild(renderer.domElement);
+
+      const scene = new THREE.Scene();
+      const camera = new THREE.PerspectiveCamera(
+        45,
+        stage.clientWidth / stage.clientHeight,
+        0.1,
+        120
+      );
+      camera.position.set(2.2, 0.3, 6);
+
+      const controls = new OrbitControls(camera, renderer.domElement);
+      controls.enableDamping = true;
+      controls.enablePan = false;
+      controls.minDistance = 3;
+      controls.maxDistance = 10;
+      controls.target.set(0, 0.4, 0);
+      controls.update();
+
+      let points;
+      let uniforms;
+
+      // 生成心形粒子坐标
+      function createHeartGeometry(count) {
+        const positions = new Float32Array(count * 3);
+        const scales = new Float32Array(count);
+        const offsets = new Float32Array(count);
+
+        for (let i = 0; i < count; i += 1) {
+          const { x, y, z } = sampleHeartPoint();
+          positions[i * 3] = x;
+          positions[i * 3 + 1] = y;
+          positions[i * 3 + 2] = z;
+          scales[i] = THREE.MathUtils.randFloat(0.6, 1.2);
+          offsets[i] = Math.random() * Math.PI * 2;
+        }
+
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+        geometry.setAttribute("aScale", new THREE.BufferAttribute(scales, 1));
+        geometry.setAttribute("aOffset", new THREE.BufferAttribute(offsets, 1));
+        return geometry;
+      }
+
+      // 通过 2D 心形参数方程 + 厚度随机生成 3D 点
+      function sampleHeartPoint() {
+        const t = Math.random() * Math.PI * 2;
+        const r = Math.pow(Math.random(), 0.45); // 越靠近外轮廓概率越大
+        const x2d = 16 * Math.sin(t) ** 3;
+        const y2d =
+          13 * Math.cos(t) -
+          5 * Math.cos(2 * t) -
+          2 * Math.cos(3 * t) -
+          Math.cos(4 * t);
+        const scale = 0.14;
+        const thickness = (Math.random() - 0.5) * config.depthFactor;
+        return {
+          x: (x2d * r * scale) / 2,
+          y: (y2d * r * scale) / 2,
+          z: thickness,
+        };
+      }
+
+      // 构建粒子系统（使用自定义 Shader）
+      function buildHeart(count) {
+        if (points) {
+          points.geometry.dispose();
+          points.material.dispose();
+          scene.remove(points);
+        }
+
+        const geometry = createHeartGeometry(count);
+        uniforms = {
+          uTime: { value: 0 },
+          uPulseSpeed: { value: config.pulseSpeed },
+          uFloatAmplitude: { value: config.floatAmplitude },
+          uPointSize: { value: config.pointSize },
+          uColorA: { value: new THREE.Color(config.colorA) },
+          uColorB: { value: new THREE.Color(config.colorB) },
+        };
+
+        const material = new THREE.ShaderMaterial({
+          uniforms,
+          transparent: true,
+          depthWrite: false,
+          blending: THREE.AdditiveBlending,
+          vertexShader: /* glsl */ `
+            uniform float uTime;
+            uniform float uPulseSpeed;
+            uniform float uFloatAmplitude;
+            uniform float uPointSize;
+            attribute float aScale;
+            attribute float aOffset;
+            varying float vMix;
+
+            void main() {
+              float pulse = 0.85 + 0.15 * sin(uTime * uPulseSpeed + aOffset);
+              vec3 transformed = position * pulse;
+              transformed.y += sin(uTime * 0.6 + aOffset) * uFloatAmplitude;
+              transformed.x += cos(uTime * 0.3 + aOffset) * (uFloatAmplitude * 0.3);
+
+              vec4 mvPosition = modelViewMatrix * vec4(transformed, 1.0);
+              gl_PointSize = aScale * uPointSize * (1.2 / -mvPosition.z);
+              gl_Position = projectionMatrix * mvPosition;
+              vMix = pulse;
+            }
+          `,
+          fragmentShader: /* glsl */ `
+            precision mediump float;
+            uniform vec3 uColorA;
+            uniform vec3 uColorB;
+            varying float vMix;
+
+            void main() {
+              vec2 uv = gl_PointCoord - vec2(0.5);
+              float dist = length(uv);
+              if (dist > 0.5) discard;
+              float alpha = smoothstep(0.5, 0.0, dist);
+              vec3 color = mix(uColorA, uColorB, vMix);
+              gl_FragColor = vec4(color, alpha);
+            }
+          `,
+        });
+
+        points = new THREE.Points(geometry, material);
+        points.rotation.set(-Math.PI / 20, Math.PI / 6, 0);
+        scene.add(points);
+      }
+
+      buildHeart(config.particleCount);
+
+      // 初始化 GUI 控件
+      const gui = new GUI({ title: "粒子参数" });
+      gui.domElement.style.cssText =
+        "position:absolute;top:24px;right:24px;z-index:3;";
+
+      gui
+        .add(config, "particleCount", 2000, 9000, 500)
+        .name("粒子数量")
+        .onFinishChange((value) => {
+          buildHeart(Math.floor(value));
+        });
+
+      gui
+        .add(config, "pulseSpeed", 0.8, 3, 0.1)
+        .name("呼吸速度")
+        .onChange((value) => (uniforms.uPulseSpeed.value = value));
+
+      gui
+        .add(config, "floatAmplitude", 0.05, 0.5, 0.01)
+        .name("漂浮幅度")
+        .onChange((value) => (uniforms.uFloatAmplitude.value = value));
+
+      gui
+        .add(config, "pointSize", 25, 80, 1)
+        .name("粒子尺寸")
+        .onChange((value) => (uniforms.uPointSize.value = value));
+
+      gui
+        .add(config, "depthFactor", 1, 4, 0.1)
+        .name("厚度因子")
+        .onFinishChange(() => {
+          buildHeart(Math.floor(config.particleCount));
+        });
+
+      gui
+        .addColor(config, "colorA")
+        .name("前景色")
+        .onChange((value) => uniforms.uColorA.value.set(value));
+
+      gui
+        .addColor(config, "colorB")
+        .name("晕染色")
+        .onChange((value) => uniforms.uColorB.value.set(value));
+
+      const clock = new THREE.Clock();
+
+      function animate() {
+        requestAnimationFrame(animate);
+        const elapsed = clock.getElapsedTime();
+        if (uniforms) {
+          uniforms.uTime.value = elapsed;
+        }
+        controls.update();
+        renderer.render(scene, camera);
+      }
+
+      animate();
+
+      // 处理窗口尺寸变化
+      window.addEventListener("resize", () => {
+        const { clientWidth, clientHeight } = stage;
+        camera.aspect = clientWidth / clientHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(clientWidth, clientHeight);
+      });
+    </script>
+  </body>
+</html>
